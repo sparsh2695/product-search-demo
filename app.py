@@ -1,13 +1,19 @@
 import numpy as np
 import requests
 from flask import Flask, render_template, request
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import CrossEncoder, SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 FAKE_STORE_URL = "https://fakestoreapi.com/products"
 RRF_K = 60
 TOP_K = 5
+
+# Size of the RRF shortlist handed to the cross-encoder for reranking.
+# Wider than TOP_K so the reranker (which judges query+product jointly, and
+# is more accurate than the bi-encoder/TF-IDF retrieval stage) has room to
+# promote a relevant item that RRF ranked outside the top 5.
+SHORTLIST_K = 15
 
 # Minimum cosine similarity a query must have to a class's seed phrases to be
 # considered a match at all. Tune by encoding real queries, printing
@@ -79,6 +85,9 @@ VECTORIZER = TfidfVectorizer(stop_words="english")
 PRODUCT_TFIDF = VECTORIZER.fit_transform(CORPUS)
 print(f"Computed TF-IDF matrix: {PRODUCT_TFIDF.shape}")
 
+print("Loading cross-encoder reranker (ms-marco-MiniLM-L-6-v2)...")
+CROSS_ENCODER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
 
 def _ranks_from_scores(scores):
     order = np.argsort(-scores)
@@ -130,8 +139,14 @@ def search(query, top_k=TOP_K):
 
     rrf_scores = 1.0 / (RRF_K + semantic_ranks) + 1.0 / (RRF_K + lexical_ranks)
 
-    top_local = np.argsort(-rrf_scores)[:top_k]
-    return [PRODUCTS[candidates[i]] for i in top_local]
+    shortlist_local = np.argsort(-rrf_scores)[:SHORTLIST_K]
+    shortlist_ids = candidates[shortlist_local]
+
+    pairs = [(query, CORPUS[i]) for i in shortlist_ids]
+    rerank_scores = CROSS_ENCODER.predict(pairs)
+    reranked_ids = shortlist_ids[np.argsort(-rerank_scores)][:top_k]
+
+    return [PRODUCTS[i] for i in reranked_ids]
 
 
 EXAMPLE_QUERIES = [

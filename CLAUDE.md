@@ -22,14 +22,30 @@ Single file, `app.py`. On startup:
    embeds the product corpus into `PRODUCT_EMBEDDINGS`.
 3. Fits a `TfidfVectorizer` over the same corpus into `PRODUCT_TFIDF`.
 
-`search(query)` combines two signals via **Reciprocal Rank Fusion (RRF)**:
-- Semantic similarity (`MODEL` embeddings, cosine similarity)
-- Lexical similarity (TF-IDF, cosine similarity)
+`search(query)` is a two-stage **retrieve-then-rerank** pipeline:
 
-Each candidate gets ranked by both signals; `1/(RRF_K + rank)` is summed
-across the two rankings and the top `TOP_K` (5) win. `RRF_K = 60` is a
-standard default from the RRF literature — trust it unless there's a
-concrete reason to retune.
+1. **Retrieval** — combines two signals via **Reciprocal Rank Fusion
+   (RRF)**: semantic similarity (`MODEL` embeddings, cosine similarity)
+   and lexical similarity (TF-IDF, cosine similarity). Each candidate is
+   ranked by both signals; `1/(RRF_K + rank)` is summed across the two
+   rankings. `RRF_K = 60` is a standard default from the RRF literature —
+   trust it unless there's a concrete reason to retune. This stage
+   produces a shortlist of `SHORTLIST_K` (15) candidates, not the final 5.
+2. **Rerank** — `CROSS_ENCODER` (`cross-encoder/ms-marco-MiniLM-L-6-v2`,
+   loaded once at startup, same `sentence-transformers` package as
+   `MODEL` — no extra dependency) scores each `(query, product_text)`
+   pair jointly, which is more accurate than the bi-encoder's
+   independently-computed embeddings because it actually attends across
+   query and product together. The shortlist is re-sorted by this score
+   and the top `TOP_K` (5) become the final result.
+
+**Why bother with a shortlist funnel for only 20 products:** at this
+catalog size you could cross-encode the whole catalog directly and skip
+RRF as a pre-filter. The two-stage structure is kept anyway to demonstrate
+the pattern used at real scale, where cross-encoding every product per
+query would be too slow — RRF stays as the cheap, recall-oriented first
+pass. Measured effect on the seeded eval: retrieval-only Precision@5 was
+0.48, with reranking it's 0.52 (see `eval_relevance.py`).
 
 ## Gender-intent category filtering
 
