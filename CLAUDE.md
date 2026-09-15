@@ -76,6 +76,33 @@ for q in ["something warm for winter", "gift for my dad",
     print(q, "->", _excluded_category(emb))
 ```
 
+## Evaluation workflow
+
+Two separate mechanisms, because they answer different questions:
+
+- **`tests/test_intent_classifier.py`** (pytest) — regression tests for
+  `_excluded_category`. These have an objective right answer (does the
+  query imply a gender, and does the classifier catch it), so they're
+  real pass/fail tests. Install dev deps with
+  `pip install -r requirements-dev.txt`, run with `python -m pytest tests/ -v`.
+  Run this after any change to the seed phrases, threshold, or margin.
+
+- **`eval_relevance.py`** — hand-labeled relevance eval for `search()`
+  overall (RRF-ranked results, not just the gender filter). "Is product X
+  relevant to query Y" isn't objective, so this isn't a pass/fail test —
+  it's a small labeled dataset (`LABELED_QUERIES`: query -> relevant
+  product ids) scored via Precision@5/Recall@5 against live search
+  output. The seeded labels were picked by reading the product catalog,
+  not by you — review/adjust `LABELED_QUERIES` before treating the
+  scores as real ground truth. Run with `python eval_relevance.py`.
+  Useful for catching ranking issues the classifier tests can't see (e.g.
+  it already surfaced that "gift for my dad" ranks jewelry above two
+  relevant men's shirts — a real gap in the RRF ranking, not the intent
+  classifier).
+
+Add new cases to both files as the catalog or use cases grow, rather than
+one-off manual scripts.
+
 ## Repo state
 
 - Git repo initialized and pushed to
