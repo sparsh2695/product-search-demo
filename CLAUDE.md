@@ -44,8 +44,31 @@ catalog size you could cross-encode the whole catalog directly and skip
 RRF as a pre-filter. The two-stage structure is kept anyway to demonstrate
 the pattern used at real scale, where cross-encoding every product per
 query would be too slow — RRF stays as the cheap, recall-oriented first
-pass. Measured effect on the seeded eval: retrieval-only Precision@5 was
-0.48, with reranking it's 0.52 (see `eval_relevance.py`).
+pass.
+
+**Dynamic result count.** `search()` used to always return exactly
+`TOP_K` results, padded with whatever scored highest even if irrelevant
+(e.g. "gift for dad" returned 5 results but only 1 was actually relevant).
+`_confident_count()` now caps results to however many reranked candidates
+fall within `RERANK_MARGIN` (5.0) of the shortlist's *top* cross-encoder
+score — relative to each query's own top score, not a global threshold,
+because this cross-encoder's raw scores aren't calibrated across query
+types (see the `RERANK_MARGIN` comment in `app.py` for the full
+reasoning and the "gear for outdoor hiking" case that drove the margin
+value). This always keeps at least the top result. Known, accepted
+limitation: for queries where a genuinely irrelevant item scores between
+two genuinely relevant ones (e.g. a backpack interleaved among jewelry
+results for "everyday jewelry"), no margin value fixes that — it's a
+real calibration limit of this small MS-MARCO-trained model on short
+e-commerce queries, not something to tune away. Measured effect on the
+seeded eval (mean precision within each query's own returned window,
+across 5 queries): 0.48 retrieval-only → 0.52 fixed-top-5 reranking →
+0.74 with the dynamic cutoff (see `eval_relevance.py`). `recall_at_k` in
+that script is normalized by `min(returned window, |relevant|)`, not the
+raw relevant-item count, so a deliberately short but fully-correct answer
+(e.g. "gift for dad" → 1 result, 1 hit) scores Recall = 1.0 instead of
+being penalized for not surfacing every relevant item in the whole
+catalog.
 
 ## Gender-intent category filtering
 
@@ -107,8 +130,10 @@ Two separate mechanisms, because they answer different questions:
   overall (RRF-ranked results, not just the gender filter). "Is product X
   relevant to query Y" isn't objective, so this isn't a pass/fail test —
   it's a small labeled dataset (`LABELED_QUERIES`: query -> relevant
-  product ids) scored via Precision@5/Recall@5 against live search
-  output. The seeded labels were picked by reading the product catalog,
+  product ids) scored via precision/recall against live search output,
+  each computed within that query's own returned window since `search()`
+  returns a dynamic count, not always `TOP_K` (see "Dynamic result count"
+  above). The seeded labels were picked by reading the product catalog,
   not by you — review/adjust `LABELED_QUERIES` before treating the
   scores as real ground truth. Run with `python eval_relevance.py`.
   Useful for catching ranking issues the classifier tests can't see (e.g.

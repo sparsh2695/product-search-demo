@@ -7,7 +7,27 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 FAKE_STORE_URL = "https://fakestoreapi.com/products"
 RRF_K = 60
-TOP_K = 5
+TOP_K = 5  # Hard cap on results returned; the actual count can be lower --
+           # see RERANK_MARGIN -- when the reranker isn't confident beyond
+           # the top match(es).
+
+# Cross-encoder score margin (raw model-score units) below the shortlist's
+# top reranked score, within which a candidate is still considered
+# "confidently relevant" and kept. Relative to each query's own top score,
+# not an absolute cutoff, because this cross-encoder's raw scores are not
+# well-calibrated across query types: a clean query like "gift for dad"
+# tops out around 0.5, while "everyday jewelry" tops out around -5.1 even
+# though that top jewelry match is fully valid. Widen to keep more
+# borderline results; narrow to be stricter. 5.0 was chosen empirically:
+# smaller values (e.g. 2.0) over-pruned "gear for outdoor hiking" down to
+# just the reranker's single (questionable) top pick, dropping an
+# obviously-relevant backpack that scored 4.76 points lower -- a case
+# where the cross-encoder's own ranking, not the margin logic, was
+# shakier than usual. Note: for ambiguous queries where relevant and
+# irrelevant items sit close together in score, no value here will be
+# perfectly precise -- that's a real calibration limitation of this model
+# on short e-commerce queries, not a bug to tune away.
+RERANK_MARGIN = 5.0
 
 # Size of the RRF shortlist handed to the cross-encoder for reranking.
 # Wider than TOP_K so the reranker (which judges query+product jointly, and
@@ -96,6 +116,17 @@ def _ranks_from_scores(scores):
     return ranks
 
 
+def _confident_count(sorted_scores, top_k):
+    """Given cross-encoder scores sorted descending, count how many leading
+    scores are within RERANK_MARGIN of the top score -- i.e., the reranker
+    is nearly as confident about them as its single best match -- capped at
+    top_k. Always returns at least 1, since the top score is trivially
+    within its own margin of itself."""
+    top_score = sorted_scores[0]
+    within_margin = sorted_scores >= (top_score - RERANK_MARGIN)
+    return min(int(np.count_nonzero(within_margin)), top_k)
+
+
 def _excluded_category(query_embedding):
     """If the query embedding is strongly and unambiguously closer to one
     gender's seed phrases than the other, return the clothing category for
@@ -144,7 +175,11 @@ def search(query, top_k=TOP_K):
 
     pairs = [(query, CORPUS[i]) for i in shortlist_ids]
     rerank_scores = CROSS_ENCODER.predict(pairs)
-    reranked_ids = shortlist_ids[np.argsort(-rerank_scores)][:top_k]
+
+    order = np.argsort(-rerank_scores)
+    sorted_rerank_scores = rerank_scores[order]
+    n_confident = _confident_count(sorted_rerank_scores, top_k)
+    reranked_ids = shortlist_ids[order][:n_confident]
 
     return [PRODUCTS[i] for i in reranked_ids]
 
