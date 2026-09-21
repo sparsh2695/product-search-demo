@@ -29,6 +29,60 @@ TOP_K = 5  # Hard cap on results returned; the actual count can be lower --
 # on short e-commerce queries, not a bug to tune away.
 RERANK_MARGIN = 5.0
 
+# Minimum standard deviation across the shortlist's cross-encoder scores,
+# below which search() returns no results at all instead of forcing a
+# top-N pick. Unlike RERANK_MARGIN/GENDER_INTENT_THRESHOLD, this isn't a
+# floor on score *magnitude* -- cross-encoder magnitude isn't comparable
+# across queries (see RERANK_MARGIN above), and neither is bi-encoder
+# cosine similarity: e.g. "halloween costume" scores a 0.313 top semantic
+# match, on par with "gift for my dad"'s 0.324, even though this catalog
+# has nothing costume-related. A per-category classifier (query vs.
+# "electronics"/"jewelery"/"men's clothing"/"women's clothing" seed
+# phrases, same max-cosine-over-seeds approach as the gender classifier)
+# was tried and fails the same way: "halloween costume" scores 0.560
+# against the jewelery seeds, *higher* than genuinely valid queries like
+# "gift for my dad" (0.469) or "gear for outdoor hiking" (0.393) -- there
+# is no cut point in the sorted score list that separates real matches
+# from queries this catalog has nothing for. Neither threshold nor
+# top-class-vs-runner-up margin (the gender classifier's GENDER_INTENT_
+# MARGIN approach) fixes this: margin tracks how cleanly a query splits
+# across the 4 known categories, not whether it belongs to any of them --
+# e.g. "t-shirt" (valid, genuinely unisex) has a tiny 0.029 margin, while
+# "kitchen appliance" (nothing in the catalog) has a comfortable 0.135
+# margin toward "electronics" purely from shared retail vocabulary.
+#
+# What does separate the two cases is the *spread* of cross-encoder
+# scores across the whole 15-item shortlist, independent of their
+# absolute level: when a real match exists, the reranker pulls it away
+# from the rest of the shortlist (high variance); when nothing matches,
+# every candidate gets a similarly bad score (flat, low-variance noise),
+# regardless of whether that noise floor sits at -5 or -11 for a given
+# query.
+#
+# 0.5 is not hand-picked -- it's the F1-optimal cut point from a sweep
+# over a 23-valid/16-junk labeled query set, see calibrate_std_floor.py
+# (run it to reproduce or extend the set). The sweep's optimal region is
+# actually the whole interval (0.486, 0.543] -- every threshold in that
+# range gives identical classification results on the calibration set,
+# so 0.5 is just a clean value inside it, not a precise optimum. At this
+# floor: 22/23 valid queries are kept, including all 5 eval_relevance.py
+# labels (lowest is "storage for my laptop" at 0.947), and 13/16 junk
+# queries are correctly rejected (halloween costume: 0.196, kitchen
+# appliance: 0.085, cooking pot: 0.070, etc). As with LABELED_QUERIES in
+# eval_relevance.py, the valid/junk labels in calibrate_std_floor.py are
+# a judgment call made while reading the catalog, not independently
+# verified ground truth -- review before extending.
+#
+# Known, accepted misses that no value here fixes (see
+# calibrate_std_floor.py output for the full list): "video game
+# console" (std 2.18), "warm gloves" (2.15), and "sunglasses" (0.68)
+# slip through as false positives; "birthday present for my sister"
+# (0.05) is dropped as a false negative -- these sit outside the
+# (0.486, 0.543] safe interval entirely, so they're not a
+# threshold-tuning gap, they're queries where this signal itself
+# doesn't discriminate correctly.
+SHORTLIST_STD_FLOOR = 0.5
+
 # Size of the RRF shortlist handed to the cross-encoder for reranking.
 # Wider than TOP_K so the reranker (which judges query+product jointly, and
 # is more accurate than the bi-encoder/TF-IDF retrieval stage) has room to
@@ -150,7 +204,13 @@ def _excluded_category(query_embedding):
     return None
 
 
-def search(query, top_k=TOP_K):
+def _shortlist_rerank_scores(query):
+    """Retrieve-then-rerank up through the cross-encoder scoring step,
+    stopping short of the final confident-count cutoff. Shared by
+    search() and calibrate_std_floor.py so both use the exact same
+    pipeline -- the calibration script scores SHORTLIST_STD_FLOOR
+    candidates against real retrieval behavior, not a reimplementation
+    of it that could drift out of sync."""
     query_embedding = MODEL.encode([query], normalize_embeddings=True)
 
     exclude_category = _excluded_category(query_embedding)
@@ -174,7 +234,16 @@ def search(query, top_k=TOP_K):
     shortlist_ids = candidates[shortlist_local]
 
     pairs = [(query, CORPUS[i]) for i in shortlist_ids]
-    rerank_scores = CROSS_ENCODER.predict(pairs)
+    rerank_scores = np.asarray(CROSS_ENCODER.predict(pairs))
+
+    return shortlist_ids, rerank_scores
+
+
+def search(query, top_k=TOP_K):
+    shortlist_ids, rerank_scores = _shortlist_rerank_scores(query)
+
+    if np.std(rerank_scores) < SHORTLIST_STD_FLOOR:
+        return []
 
     order = np.argsort(-rerank_scores)
     sorted_rerank_scores = rerank_scores[order]

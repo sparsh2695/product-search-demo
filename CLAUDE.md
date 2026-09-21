@@ -70,6 +70,57 @@ raw relevant-item count, so a deliberately short but fully-correct answer
 being penalized for not surfacing every relevant item in the whole
 catalog.
 
+**No-match detection.** Neither the dynamic cutoff above nor any absolute
+score fixes the case where the catalog genuinely has nothing relevant
+(e.g. "halloween costume" — this 20-product catalog has no costumes).
+Three score-magnitude approaches were tried and all failed the same way,
+because none of this pipeline's scores carry an absolute "is this
+actually relevant" meaning across different queries — only relative
+ranking within one query's candidates:
+- An absolute floor on the cross-encoder's top shortlist score: fails
+  because "storage for my laptop" (valid, top score -8.605) and
+  "sunglasses" (nothing in the catalog, -8.717) are indistinguishable.
+- An absolute floor on bi-encoder cosine similarity to the product
+  catalog: fails for the same reason — "halloween costume" scores 0.313
+  semantic similarity to its best product match, on par with "gift for
+  my dad"'s 0.324, even though only one of those queries has a real
+  match. Sentence embeddings are anisotropic (nearly all sentences,
+  related or not, cluster into a narrow cosine-similarity band), so raw
+  magnitude isn't informative here.
+- A category-membership classifier, structured exactly like the
+  gender-intent classifier below (seed phrases per catalog category —
+  electronics / jewelery / men's / women's clothing — max cosine
+  similarity, threshold, and margin over the runner-up category): also
+  fails, and not from a bad threshold/margin value. It's a structural
+  mismatch — gender classification tests one real symmetric axis where
+  an unrelated query scores low on *both* poles, but "is this query in
+  any of our 4 unrelated retail categories" doesn't have an analogous
+  "belongs to none of them" region nearby in a general-purpose
+  embedding's space; almost any shopping-flavored query (including ones
+  for products this store doesn't carry) lands moderately close to at
+  least one category. Concretely, "halloween costume" scores 0.560
+  against the jewelery seeds — *higher* than valid queries like "gift
+  for my dad" (0.469) — and margin doesn't help either: "t-shirt"
+  (valid, genuinely unisex) has a tiny 0.029 margin between its top two
+  categories, while "kitchen appliance" (nothing in the catalog) has a
+  comfortable 0.135 margin toward "electronics" from shared retail
+  vocabulary alone.
+
+What does work: `SHORTLIST_STD_FLOOR` (see the comment in `app.py`) —
+the standard deviation of the cross-encoder scores across the whole
+15-item shortlist, independent of their absolute level. When a real
+match exists, the reranker pulls it away from the rest of the
+shortlist (high variance); when nothing matches, every candidate gets
+a similarly bad score (flat, low-variance noise), whether that noise
+floor sits at -5 or -11 for a given query. `search()` returns `[]`
+when this spread falls below the floor. This isn't perfectly clean —
+see the `SHORTLIST_STD_FLOOR` comment for the known false
+positives/negatives — but it's meaningfully better than full
+interleaving: at the calibrated floor of 0.5 it keeps 22/23 valid test
+queries (including all 5 `eval_relevance.py` labels) while rejecting
+13/16 junk queries. The value is F1-optimal on a labeled calibration
+set, not hand-picked — see `calibrate_std_floor.py` below.
+
 ## Gender-intent category filtering
 
 Some queries imply a gendered gift/audience (e.g. "gift for my dad"), in
@@ -117,7 +168,7 @@ for q in ["something warm for winter", "gift for my dad",
 
 ## Evaluation workflow
 
-Two separate mechanisms, because they answer different questions:
+Three separate mechanisms, because they answer different questions:
 
 - **`tests/test_intent_classifier.py`** (pytest) — regression tests for
   `_excluded_category`. These have an objective right answer (does the
@@ -141,8 +192,16 @@ Two separate mechanisms, because they answer different questions:
   relevant men's shirts — a real gap in the RRF ranking, not the intent
   classifier).
 
-Add new cases to both files as the catalog or use cases grow, rather than
-one-off manual scripts.
+- **`calibrate_std_floor.py`** — F1 sweep for `SHORTLIST_STD_FLOOR` (see
+  "No-match detection" above) against a labeled `VALID_QUERIES`/
+  `JUNK_QUERIES` set. Reuses `app._shortlist_rerank_scores()` (the same
+  pipeline `search()` calls) rather than reimplementing it, so it can't
+  drift out of sync. Run with `python calibrate_std_floor.py`. Run this
+  after any change to retrieval/reranking that could shift shortlist
+  score distributions, and re-run after extending the query set.
+
+Add new cases to all three files as the catalog or use cases grow, rather
+than one-off manual scripts.
 
 ## Repo state
 
