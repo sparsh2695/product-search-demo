@@ -27,6 +27,43 @@ TOP_K = 5  # Hard cap on results returned; the actual count can be lower --
 # irrelevant items sit close together in score, no value here will be
 # perfectly precise -- that's a real calibration limitation of this model
 # on short e-commerce queries, not a bug to tune away.
+#
+# Second documented instance of that limitation: "winter clothes" keeps a
+# genuinely irrelevant summer T-shirt (score 2.697) alongside two real
+# winter jackets (6.891, 6.197), because 6.891-2.697=4.194 is inside the
+# 5.0 margin. Tightening the margin to exclude it would need <4.194, which
+# also drops the "gear for outdoor hiking" backpack above (needs >=4.763)
+# -- no single value satisfies both (4.194 < 4.763). Five alternative
+# cutoff approaches were tried, using the shortlist's score shape/spread
+# instead of a flat number -- see calibrate_rerank_cutoff.py for the
+# reproducible numbers:
+#   1. Margin scaled by shortlist std (z-score-style): backwards -- the
+#      T-shirt's standardized gap (0.712) is *smaller* than the backpack's
+#      (1.626), so any cutoff generous enough to keep the backpack keeps
+#      the T-shirt too.
+#   2. Kneedle knee detection: the curve's knee lands one step past the
+#      T-shirt, not before it -- still includes it, and regresses 2 other
+#      currently-perfect queries when checked against the full labeled set
+#      (mean precision across LABELED_QUERIES drops from 0.74 to 0.56).
+#   3. Tail noise-floor z-test (z=2,2.5,3): the T-shirt isn't remotely
+#      close to the noise floor, so no z excludes it (mean precision 0.62).
+#   4. Cross-signal corroboration (does semantic/lexical retrieval agree
+#      with the cross-encoder?): the T-shirt is independently rank 2-3/20
+#      on both the semantic and lexical signals, not just the cross-
+#      encoder -- it's a genuine top match on every signal this pipeline
+#      computes, so no corroboration threshold excludes it without also
+#      excluding real jewelry results in the backpack case above (those
+#      score similarly poorly, 12-14/20, on the lexical signal).
+#   5. Raising SHORTLIST_STD_FLOOR to also catch a different bad query
+#      ("all products") was considered and rejected in favor of a
+#      dedicated browse-all-intent classifier (see BROWSE_ALL_THRESHOLD)
+#      -- it would have traded 2 correctly-working queries for 2 different
+#      fixes, not a net improvement.
+# Conclusion: none of the signals this pipeline computes (cross-encoder
+# score, semantic similarity, lexical similarity) encode "seasonally
+# appropriate," only topical relevance to "clothes" in general -- this is
+# a genuine model/embedding limitation, not an unexplored corner of
+# cutoff-tuning. RERANK_MARGIN stays at 5.0.
 RERANK_MARGIN = 5.0
 
 # Minimum standard deviation across the shortlist's cross-encoder scores,
@@ -116,6 +153,32 @@ FEMALE_SEED_PHRASES = [
     "outfit for my sister",
 ]
 
+# Minimum cosine similarity a query must have to the browse-all seed phrases
+# to be treated as "show me the whole catalog" rather than a search for
+# something specific. Unlike GENDER_INTENT_THRESHOLD, no margin-against-a-
+# second-class is needed -- this is one yes/no direction, not a choice
+# between two competing classes. Calibrated empirically: 8 true browse-all
+# phrasings ("all products", "show me everything", "what do you have", ...)
+# scored between 0.692 and 1.000 (min 0.692); every specific-product query
+# tested, including tricky category-specific-but-browse-phrased ones like
+# "show me your jewelry" (0.473) and "what electronics do you sell" (0.523),
+# scored at most 0.523. 0.6 sits centered in that real 0.17-point gap. This
+# works cleanly, unlike an earlier attempt at a broad "which of our 4
+# catalog categories does this query belong to" classifier (see the
+# no-match-detection comment on SHORTLIST_STD_FLOOR above) -- that failed
+# because it tested a broad multi-category question where nearly any
+# shopping-flavored query lands close to some category; this tests one
+# narrow, specific direction ("does this mean literally everything"),
+# closer in spirit to the gender classifier than the category one.
+BROWSE_ALL_THRESHOLD = 0.6
+
+BROWSE_ALL_SEED_PHRASES = [
+    "show me everything", "all products", "browse the full catalog",
+    "what do you have", "see all items", "show your entire catalog",
+    "everything you sell", "browse all products", "show me your whole inventory",
+    "what is in stock", "see the full range", "show all items", "list everything",
+]
+
 app = Flask(__name__)
 
 
@@ -153,6 +216,9 @@ print(
     f"Computed gender-intent seed embeddings: "
     f"{len(MALE_SEED_PHRASES)} male, {len(FEMALE_SEED_PHRASES)} female"
 )
+
+BROWSE_ALL_SEED_EMBEDDINGS = MODEL.encode(BROWSE_ALL_SEED_PHRASES, normalize_embeddings=True)
+print(f"Computed browse-all-intent seed embeddings: {len(BROWSE_ALL_SEED_PHRASES)} phrases")
 
 print("Fitting TF-IDF vectorizer...")
 VECTORIZER = TfidfVectorizer(stop_words="english")
@@ -204,14 +270,27 @@ def _excluded_category(query_embedding):
     return None
 
 
-def _shortlist_rerank_scores(query):
+def _is_browse_all(query_embedding):
+    """True if the query means "show me the whole catalog" rather than a
+    search for something specific -- see BROWSE_ALL_THRESHOLD for the
+    calibration evidence behind the cutoff."""
+    return bool(
+        cosine_similarity(query_embedding, BROWSE_ALL_SEED_EMBEDDINGS).max()
+        >= BROWSE_ALL_THRESHOLD
+    )
+
+
+def _shortlist_rerank_scores(query, query_embedding=None):
     """Retrieve-then-rerank up through the cross-encoder scoring step,
     stopping short of the final confident-count cutoff. Shared by
     search() and calibrate_std_floor.py so both use the exact same
     pipeline -- the calibration script scores SHORTLIST_STD_FLOOR
     candidates against real retrieval behavior, not a reimplementation
-    of it that could drift out of sync."""
-    query_embedding = MODEL.encode([query], normalize_embeddings=True)
+    of it that could drift out of sync. Accepts an optional precomputed
+    query_embedding so search() can reuse the one it already encoded for
+    the browse-all/gender-intent checks instead of encoding twice."""
+    if query_embedding is None:
+        query_embedding = MODEL.encode([query], normalize_embeddings=True)
 
     exclude_category = _excluded_category(query_embedding)
     if exclude_category:
@@ -240,7 +319,15 @@ def _shortlist_rerank_scores(query):
 
 
 def search(query, top_k=TOP_K):
-    shortlist_ids, rerank_scores = _shortlist_rerank_scores(query)
+    query_embedding = MODEL.encode([query], normalize_embeddings=True)
+
+    if _is_browse_all(query_embedding):
+        # Deliberate scope simplification: bypasses gender-category
+        # exclusion too. A query combining both intents (e.g. "show me
+        # everything for my dad") is out of scope for this demo.
+        return list(PRODUCTS)
+
+    shortlist_ids, rerank_scores = _shortlist_rerank_scores(query, query_embedding)
 
     if np.std(rerank_scores) < SHORTLIST_STD_FLOOR:
         return []

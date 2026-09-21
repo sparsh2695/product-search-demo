@@ -57,15 +57,35 @@ types (see the `RERANK_MARGIN` comment in `app.py` for the full
 reasoning and the "gear for outdoor hiking" case that drove the margin
 value). This always keeps at least the top result. Known, accepted
 limitation: for queries where a genuinely irrelevant item scores between
-two genuinely relevant ones (e.g. a backpack interleaved among jewelry
-results for "everyday jewelry"), no margin value fixes that — it's a
-real calibration limit of this small MS-MARCO-trained model on short
-e-commerce queries, not something to tune away. Measured effect on the
-seeded eval (mean precision within each query's own returned window,
-across 5 queries): 0.48 retrieval-only → 0.52 fixed-top-5 reranking →
-0.74 with the dynamic cutoff (see `eval_relevance.py`). `recall_at_k` in
-that script is normalized by `min(returned window, |relevant|)`, not the
-raw relevant-item count, so a deliberately short but fully-correct answer
+two genuinely relevant ones, no margin value fixes that — it's a real
+calibration limit of this small MS-MARCO-trained model on short
+e-commerce queries, not something to tune away. Two documented instances,
+with the same symptom but different root causes (see the `RERANK_MARGIN`
+comment in `app.py` for full numbers on both):
+- "everyday jewelry" keeps an irrelevant backpack interleaved among real
+  jewelry results — a **retrieval-signal coincidence**: the backpack is a
+  spurious top-1/20 lexical (TF-IDF) match despite scoring poorly (10/20)
+  on semantic similarity, while the real jewelry items are the reverse
+  (strong semantic rank, weak lexical rank).
+- "winter clothes" keeps an irrelevant summer T-shirt alongside two real
+  winter jackets — a **genuine conceptual gap**, not a signal coincidence:
+  the T-shirt is independently a top-3 match on *every* signal this
+  pipeline computes (semantic, lexical, and cross-encoder), because none
+  of them encode "seasonally appropriate," only topical relevance to
+  "clothes." Five alternative cutoff approaches (std-scaled margin, knee
+  detection, noise-floor z-test, cross-signal corroboration, and a wider
+  no-match floor) were tried and evidenced to fail — see
+  `calibrate_rerank_cutoff.py` for the reproducible numbers, including
+  that the best alternative (knee detection) *drops* mean precision on
+  `eval_relevance.py`'s labeled set from 0.74 to 0.56 by regressing 2
+  other currently-perfect queries while fixing this one.
+
+Measured effect of the dynamic cutoff itself on the seeded eval (mean
+precision within each query's own returned window, across 5 queries):
+0.48 retrieval-only → 0.52 fixed-top-5 reranking → 0.74 with the dynamic
+cutoff (see `eval_relevance.py`). `recall_at_k` in that script is
+normalized by `min(returned window, |relevant|)`, not the raw
+relevant-item count, so a deliberately short but fully-correct answer
 (e.g. "gift for dad" → 1 result, 1 hit) scores Recall = 1.0 instead of
 being penalized for not surfacing every relevant item in the whole
 catalog.
@@ -166,9 +186,48 @@ for q in ["something warm for winter", "gift for my dad",
     print(q, "->", _excluded_category(emb))
 ```
 
+## Browse-all intent
+
+Queries like "all products" or "show me everything" have no specific
+semantic target — running them through the normal retrieve-then-rerank
+pipeline produces a top-5 that looks like a ranked, relevant result but is
+actually close to arbitrary (whatever happens to have moderately higher
+shortlist variance than pure noise; e.g. "all products" used to return a
+T-shirt, a necklace, another T-shirt, earrings, and a monitor as if they
+were the 5 best matches).
+
+**Decision:** a dedicated embedding-based classifier, structured like the
+gender-intent classifier (seed phrases, max cosine similarity), but with
+just one threshold and no margin-against-a-second-class, since this is a
+single yes/no direction rather than a choice between two competing
+classes:
+- `BROWSE_ALL_SEED_PHRASES`: 13 example phrases ("show me everything",
+  "all products", "what do you have", ...), embedded once at startup into
+  `BROWSE_ALL_SEED_EMBEDDINGS`.
+- `_is_browse_all(query_embedding)` checks max cosine similarity against
+  `BROWSE_ALL_THRESHOLD` (0.6). `search()` checks this immediately after
+  encoding the query (before gender-exclusion/RRF/reranking) and, if
+  true, returns the entire catalog directly, bypassing the rest of the
+  pipeline.
+- Calibrated with a real gap, unlike the failed category-membership
+  classifier from "No-match detection" above: 8 true browse-all phrasings
+  scored 0.692–1.000, while every specific-product query tested —
+  including tricky category-specific-but-browse-phrased ones like "show
+  me your jewelry" (0.473) — scored at most 0.523. This works where the
+  broader 4-category classifier didn't because it tests one narrow,
+  specific direction instead of a broad multi-category question.
+- Deliberate scope simplification: bypasses gender-category exclusion
+  too. A query combining both intents (e.g. "show me everything for my
+  dad") is out of scope.
+
+**To verify a change to this logic:** `tests/test_browse_intent.py` is a
+real pass/fail regression test (this classifier separates cleanly enough
+to be tested deterministically, unlike `SHORTLIST_STD_FLOOR`'s genuinely
+interleaved calibration set) — run with `python -m pytest tests/ -v`.
+
 ## Evaluation workflow
 
-Three separate mechanisms, because they answer different questions:
+Five separate mechanisms, because they answer different questions:
 
 - **`tests/test_intent_classifier.py`** (pytest) — regression tests for
   `_excluded_category`. These have an objective right answer (does the
@@ -176,6 +235,16 @@ Three separate mechanisms, because they answer different questions:
   real pass/fail tests. Install dev deps with
   `pip install -r requirements-dev.txt`, run with `python -m pytest tests/ -v`.
   Run this after any change to the seed phrases, threshold, or margin.
+
+- **`tests/test_browse_intent.py`** (pytest) — same treatment for
+  `_is_browse_all` (see "Browse-all intent" above). Run after any change
+  to `BROWSE_ALL_SEED_PHRASES` or `BROWSE_ALL_THRESHOLD`.
+
+- **`tests/test_no_match_floor.py`** (pytest) — regression coverage for
+  `SHORTLIST_STD_FLOOR` (see "No-match detection" above) on a small, safe
+  subset of queries (not the full `calibrate_std_floor.py` set, which
+  includes documented known misses that would make a pass/fail test
+  flaky). Run after any change to retrieval/reranking.
 
 - **`eval_relevance.py`** — hand-labeled relevance eval for `search()`
   overall (RRF-ranked results, not just the gender filter). "Is product X
@@ -200,7 +269,15 @@ Three separate mechanisms, because they answer different questions:
   after any change to retrieval/reranking that could shift shortlist
   score distributions, and re-run after extending the query set.
 
-Add new cases to all three files as the catalog or use cases grow, rather
+- **`calibrate_rerank_cutoff.py`** — not a calibration to adopt a value
+  from (unlike `calibrate_std_floor.py`), but checked-in reproducible
+  evidence for the `RERANK_MARGIN` "winter clothes" limitation documented
+  above: it prints all five attempted alternative cutoff approaches'
+  actual numbers against `LABELED_QUERIES`, confirming none beats the
+  `RERANK_MARGIN=5.0` baseline without regressing something. Run with
+  `python calibrate_rerank_cutoff.py`.
+
+Add new cases to these files as the catalog or use cases grow, rather
 than one-off manual scripts.
 
 ## Repo state
