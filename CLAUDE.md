@@ -141,6 +141,86 @@ queries (including all 5 `eval_relevance.py` labels) while rejecting
 13/16 junk queries. The value is F1-optimal on a labeled calibration
 set, not hand-picked — see `calibrate_std_floor.py` below.
 
+## Item-type discrimination
+
+A third, distinct search-quality gap, different in kind from the two
+`RERANK_MARGIN` cases above: `"winter scarf"` returns the BIYLACLESEN
+Snowboard Jacket as its top (and only) result, even though this
+20-product catalog has no scarves at all. The other two documented
+cases are about *how many* already-correctly-ordered results to keep
+(padding a good result with a trailing bad one); this is about the
+**#1 result itself being wrong** — `RERANK_MARGIN` and
+`SHORTLIST_STD_FLOOR` only ever decide how many shortlist candidates
+to return, never whether the top-ranked one is actually the right item
+type, so neither mechanism can address this by design, not by a
+missing tuning value.
+
+`SHORTLIST_STD_FLOOR` doesn't catch it either, and isn't malfunctioning
+when it doesn't: the shortlist genuinely has a "one candidate pulls
+away from a flat tail" shape (std=3.415, floor=0.5) — the same shape a
+real match produces. The floor can only tell "no discrimination at
+all" (flat scores, e.g. "halloween costume": std=0.196) from "found
+something with real signal," not whether that something is the right
+something.
+
+All three retrieval signals independently favor the wrong item, and at
+higher magnitude than for a query that works correctly:
+
+```
+                         lexical   semantic   cross-encoder
+winter scarf (wrong)      0.1442    0.4626      -0.642
+gift for my dad (right)   0.1818    0.3243       0.469
+```
+
+Root cause for the lexical signal: `"scarf"` isn't in the fitted
+TF-IDF vocabulary at all (no product ever uses that word), so
+`VECTORIZER.transform(["winter scarf"])` silently drops it —
+`scikit-learn` ignores out-of-vocabulary tokens rather than erroring —
+and the resulting vector is identical to the one for `"winter"` alone.
+
+Three fixes were tried and rejected, each targeting a different layer
+of the pipeline:
+- **Token-coverage / out-of-vocabulary check** (reject a query if any
+  content word never appears in any product): also flags `"gift for my
+  dad"` (`"dad"` is OOV too) — one of the most reliably-correct queries
+  in the app, whose match works entirely through semantic similarity,
+  not lexical overlap. Can't distinguish "missing word because we
+  don't carry that item" from "missing word because the real match
+  doesn't use it" — both look identical to a coverage check.
+- **Per-word semantic decomposition** (embed each query word
+  separately, require each to independently support the match):
+  embedding `"scarf"` alone actually scores *higher* against the
+  jacket (0.3341) than `"winter"` alone (0.2886) with the current
+  model — the opposite of what would be needed to flag it. Scarves and
+  jackets sit close together in embedding space simply as members of
+  the same "cold-weather apparel" cluster; the model was never trained
+  to separate specific product types within a topic, only to judge
+  general topical/paraphrase relatedness.
+- **Larger embedding model** (`all-mpnet-base-v2`, same
+  `sentence-transformers` package, no new dependency): per-word
+  discrimination improves (scarf 0.2977 < winter 0.3564, the correct
+  direction) but the actual query-level similarity `search()` uses
+  (`"winter scarf"` as one string) goes *up*, not down (0.4762 vs
+  0.4626). Model capacity doesn't target this gap because it isn't a
+  capacity problem — general-purpose sentence embeddings are trained
+  for broad paraphrase/topic similarity, not fine-grained e-commerce
+  product-type discrimination. Swapping `MODEL` would also invalidate
+  every threshold already calibrated against its specific score
+  distributions (`GENDER_INTENT_THRESHOLD`/`MARGIN`,
+  `BROWSE_ALL_THRESHOLD`, `SHORTLIST_STD_FLOOR`) for no measured
+  benefit.
+
+Eight structurally different fixes have now been tried across this and
+the winter-clothes case (five for the cutoff/count problem above,
+three for this top-result problem), all evidenced to fail — treated as
+a genuine architectural boundary (small, general-purpose models over a
+tiny fixed catalog with no item of the requested type) rather than an
+unfound fix. For context, this is one specific, adversarially-discovered
+edge case on a system that otherwise works well: across the existing
+test/calibration sets the app sits at 90-100% correctness (35/39
+no-match cases, 9/9 gender-intent, 9/9 browse-intent, 0.74 mean
+precision on labeled relevance) — not a sign of broad unreliability.
+
 ## Gender-intent category filtering
 
 Some queries imply a gendered gift/audience (e.g. "gift for my dad"), in

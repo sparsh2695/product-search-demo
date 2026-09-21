@@ -205,6 +205,12 @@ CORPUS = [
 ]
 print(f"Loaded {len(PRODUCTS)} products.")
 
+# Known limitation: this bi-encoder judges broad topical/paraphrase
+# similarity, not fine-grained product-type identity, so a query for an
+# item this catalog doesn't carry (e.g. "winter scarf") can still score
+# highest against a topically-related item (a winter jacket) -- see
+# "Item-type discrimination" in CLAUDE.md for the full investigation
+# (three fixes tried and rejected, including swapping this model).
 print("Loading sentence-transformers model (all-MiniLM-L6-v2)...")
 MODEL = SentenceTransformer("all-MiniLM-L6-v2")
 PRODUCT_EMBEDDINGS = MODEL.encode(CORPUS, normalize_embeddings=True)
