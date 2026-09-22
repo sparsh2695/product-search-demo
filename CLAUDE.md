@@ -221,6 +221,59 @@ test/calibration sets the app sits at 90-100% correctness (35/39
 no-match cases, 9/9 gender-intent, 9/9 browse-intent, 0.74 mean
 precision on labeled relevance) — not a sign of broad unreliability.
 
+## Price filtering
+
+A price bound (e.g. "only show jewelry under $20") is an exact, structured
+constraint, not a fuzzy intent -- unlike gender or browse-all detection, it
+isn't the kind of thing an embedding classifier should judge. **Decision:**
+plain UI number inputs (`min_price`/`max_price`, alongside the existing
+query box in `templates/index.html`), read by Flask with built-in numeric
+coercion (`request.args.get("min_price", type=float)` -- returns `None` on
+missing/invalid input, no parsing needed) and passed straight into
+`search(query, min_price=None, max_price=None)`. A natural-language version
+("jewelry under $20" typed as one phrase, parsed with regex) was considered
+and rejected: it would only change *how the numbers get in*, since everything
+downstream — the candidate-pool masking, the empty-pool guard, the
+browse-all interaction — is identical either way, so the extra parsing
+surface (phrasing variants, stripping the matched phrase before scoring)
+wasn't worth it for a demo.
+
+**Mechanism:** `_price_in_range(product, min_price, max_price)` is ANDed into
+the same `keep` boolean mask `_shortlist_rerank_scores()` already builds for
+gender-category exclusion -- no new masking mechanism, just a second
+condition on the existing one. `search()`'s browse-all branch also applies
+the price filter directly to the full catalog (cheap, and "show me
+everything under $50" is a natural combination) but still does *not* apply
+gender exclusion there, extending that already-documented scope
+simplification.
+
+**Empty-candidate-pool guard, newly required:** gender exclusion alone can
+never empty the candidate pool (electronics/jewelry are never excluded by
+gender, so at least 7 products always remain), but a price range can (e.g.
+`min_price` above every product's price). Without an explicit guard,
+`PRODUCT_EMBEDDINGS[candidates]` would get 0 rows and `np.std([])` would
+return `nan` -- a `nan < SHORTLIST_STD_FLOOR` comparison is always `False`
+in numpy, so `search()` would skip the existing no-match path and crash
+later in `_confident_count` (`IndexError` on `sorted_scores[0]`) instead of
+returning `[]` cleanly. `_shortlist_rerank_scores()` now returns empty arrays
+when the post-price-filter candidate pool is empty, and `search()` checks
+for that before computing `np.std(rerank_scores)`.
+
+**Verified the "topic has zero matches in range" case separately** from the
+"price range is empty" case above, since it's the main risk of filtering the
+candidate pool *before* ranking rather than filtering results after the
+fact: searching `"electronics"` against a pool already restricted to
+`price < $50` (this catalog's cheapest electronics item is $64, so the
+filtered pool has zero electronics in it) produces a shortlist std of 0.402
+-- below `SHORTLIST_STD_FLOOR` (0.5). The existing no-match mechanism
+already generalizes to this case with no new logic: a query with no matches
+for its own topic, once forced into a same-price-band pool containing none
+of that topic, produces the same flat, undifferentiated score pattern as any
+other no-match query (e.g. "halloween costume", std=0.196). This is why
+pre-filtering the candidate pool (rather than filtering the final ranked
+results afterward, which risks silently truncating away a cheaper relevant
+item before it's ever considered) was the right design.
+
 ## Gender-intent category filtering
 
 Some queries imply a gendered gift/audience (e.g. "gift for my dad"), in
@@ -307,7 +360,7 @@ interleaved calibration set) — run with `python -m pytest tests/ -v`.
 
 ## Evaluation workflow
 
-Five separate mechanisms, because they answer different questions:
+Six separate mechanisms, because they answer different questions:
 
 - **`tests/test_intent_classifier.py`** (pytest) — regression tests for
   `_excluded_category`. These have an objective right answer (does the
@@ -325,6 +378,13 @@ Five separate mechanisms, because they answer different questions:
   subset of queries (not the full `calibrate_std_floor.py` set, which
   includes documented known misses that would make a pass/fail test
   flaky). Run after any change to retrieval/reranking.
+
+- **`tests/test_price_filter.py`** (pytest) — regression coverage for the
+  `min_price`/`max_price` candidate-pool masking (see "Price filtering"
+  above), including the empty-candidate-pool guard and the "topic has zero
+  matches in range" no-match case. Run after any change to
+  `_price_in_range()` or the candidate-masking logic in
+  `_shortlist_rerank_scores()`.
 
 - **`eval_relevance.py`** — hand-labeled relevance eval for `search()`
   overall (RRF-ranked results, not just the gender filter). "Is product X

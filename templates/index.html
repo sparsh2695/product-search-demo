@@ -52,8 +52,46 @@
 
     form.search-form {
       display: flex;
-      gap: 8px;
+      flex-direction: column;
+      gap: 12px;
       margin: 28px 0 16px;
+    }
+
+    .search-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .price-filter {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .price-filter .label {
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    .price-filter .sep {
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    input[type=number] {
+      width: 90px;
+      padding: 8px 10px;
+      font-size: 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+
+    input[type=number]:focus {
+      border-color: var(--accent);
     }
 
     input[type=text] {
@@ -229,8 +267,16 @@
     </header>
 
     <form class="search-form" action="/" method="get">
-      <input type="text" name="q" value="{{ query }}" placeholder="e.g. something warm for winter" autofocus>
-      <button type="submit">Search</button>
+      <div class="search-row">
+        <input type="text" name="q" value="{{ query }}" placeholder="e.g. something warm for winter" autofocus>
+        <button type="submit">Search</button>
+      </div>
+      <div class="price-filter">
+        <span class="label">Price range:</span>
+        <input type="number" name="min_price" min="0" step="0.01" placeholder="Min" value="{{ min_price if min_price is not none else '' }}">
+        <span class="sep">&ndash;</span>
+        <input type="number" name="max_price" min="0" step="0.01" placeholder="Max" value="{{ max_price if max_price is not none else '' }}">
+      </div>
     </form>
 
     {% if example_queries %}

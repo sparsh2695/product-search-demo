@@ -183,8 +183,13 @@ app = Flask(__name__)
 
 
 def fetch_products():
-    response = requests.get(FAKE_STORE_URL, timeout=10)
-    response.raise_for_status()
+    try:
+        response = requests.get(FAKE_STORE_URL, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to fetch products from {FAKE_STORE_URL}: {e}")
+        print("Check your network connection and that the Fake Store API is reachable, then retry.")
+        raise SystemExit(1)
     return [
         {
             "id": p["id"],
@@ -286,7 +291,15 @@ def _is_browse_all(query_embedding):
     )
 
 
-def _shortlist_rerank_scores(query, query_embedding=None):
+def _price_in_range(product, min_price, max_price):
+    if min_price is not None and product["price"] < min_price:
+        return False
+    if max_price is not None and product["price"] > max_price:
+        return False
+    return True
+
+
+def _shortlist_rerank_scores(query, query_embedding=None, min_price=None, max_price=None):
     """Retrieve-then-rerank up through the cross-encoder scoring step,
     stopping short of the final confident-count cutoff. Shared by
     search() and calibrate_std_floor.py so both use the exact same
@@ -303,7 +316,20 @@ def _shortlist_rerank_scores(query, query_embedding=None):
         keep = np.array([p["category"] != exclude_category for p in PRODUCTS])
     else:
         keep = np.ones(len(PRODUCTS), dtype=bool)
+
+    if min_price is not None or max_price is not None:
+        keep = keep & np.array([_price_in_range(p, min_price, max_price) for p in PRODUCTS])
+
     candidates = np.where(keep)[0]
+    if len(candidates) == 0:
+        # Price range can genuinely empty the pool (e.g. min_price above every
+        # product's price) -- gender exclusion alone never can (electronics/
+        # jewelry are never excluded by gender, so >=7 products always remain).
+        # Without this guard, np.std([]) below would be nan, and a
+        # `nan < SHORTLIST_STD_FLOOR` comparison is always False in numpy, so
+        # search() would skip the no-match path and crash later in
+        # _confident_count instead of returning [] cleanly.
+        return np.array([], dtype=int), np.array([])
 
     semantic_scores = cosine_similarity(query_embedding, PRODUCT_EMBEDDINGS[candidates])[0]
 
@@ -324,16 +350,25 @@ def _shortlist_rerank_scores(query, query_embedding=None):
     return shortlist_ids, rerank_scores
 
 
-def search(query, top_k=TOP_K):
+def search(query, min_price=None, max_price=None, top_k=TOP_K):
     query_embedding = MODEL.encode([query], normalize_embeddings=True)
 
     if _is_browse_all(query_embedding):
         # Deliberate scope simplification: bypasses gender-category
         # exclusion too. A query combining both intents (e.g. "show me
-        # everything for my dad") is out of scope for this demo.
-        return list(PRODUCTS)
+        # everything for my dad") is out of scope for this demo. Price IS
+        # honored here (cheap to apply, and "show me everything under $50"
+        # is a natural combination unlike the gender case above).
+        products = PRODUCTS
+        if min_price is not None or max_price is not None:
+            products = [p for p in products if _price_in_range(p, min_price, max_price)]
+        return list(products)
 
-    shortlist_ids, rerank_scores = _shortlist_rerank_scores(query, query_embedding)
+    shortlist_ids, rerank_scores = _shortlist_rerank_scores(
+        query, query_embedding, min_price, max_price
+    )
+    if len(shortlist_ids) == 0:
+        return []
 
     if np.std(rerank_scores) < SHORTLIST_STD_FLOOR:
         return []
@@ -357,9 +392,16 @@ EXAMPLE_QUERIES = [
 @app.route("/")
 def index():
     query = request.args.get("q", "").strip()
-    results = search(query) if query else []
+    min_price = request.args.get("min_price", type=float)
+    max_price = request.args.get("max_price", type=float)
+    results = search(query, min_price=min_price, max_price=max_price) if query else []
     return render_template(
-        "index.html", query=query, results=results, example_queries=EXAMPLE_QUERIES
+        "index.html",
+        query=query,
+        results=results,
+        example_queries=EXAMPLE_QUERIES,
+        min_price=min_price,
+        max_price=max_price,
     )
 
 
