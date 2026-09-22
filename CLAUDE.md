@@ -1,7 +1,8 @@
 # product-search-demo
 
-A small Flask demo of hybrid product search over the [Fake Store
-API](https://fakestoreapi.com/products) catalog (20 products).
+A small Flask demo of hybrid product search over a 20-product catalog
+vendored from the [Fake Store API](https://fakestoreapi.com/products) (see
+"Product catalog" below for why it's a local snapshot, not a live fetch).
 
 ## Running it
 
@@ -10,12 +11,43 @@ source venv/bin/activate
 python app.py   # http://127.0.0.1:5001
 ```
 
-Dependencies are pinned in `requirements.txt` (flask, requests,
-sentence-transformers, scikit-learn, numpy, gunicorn). Keep additions to this
-list to genuine necessities — this is a demo, not a production service.
-`gunicorn` is the one exception to "no production concerns": it's only used
-by `Dockerfile` for public deployment (see "Deployment" below); local dev
-still runs Flask's own server via `python app.py` and is unaffected.
+Dependencies are pinned in `requirements.txt` (flask, sentence-transformers,
+scikit-learn, numpy, gunicorn). Keep additions to this list to genuine
+necessities — this is a demo, not a production service. `gunicorn` is the
+one exception to "no production concerns": it's only used by `Dockerfile`
+for public deployment (see "Deployment" below); local dev still runs
+Flask's own server via `python app.py` and is unaffected.
+
+## Product catalog
+
+`PRODUCTS` loads from the vendored snapshot `products.json`
+(`load_products()` in `app.py`), not a live fetch from Fake Store API, for
+two independent reasons:
+
+- **Fake Store API blocks Render's outbound IP range.** Deployed to Render
+  and hit `403 Client Error: Forbidden` fetching the catalog at startup —
+  reproducible every time from Render, never from local dev. A browser-like
+  `User-Agent` header (the standard first fix for this class of problem)
+  didn't help, which points to IP-range blocking rather than header/bot
+  filtering — not something a retry would get past.
+- **Every calibrated constant in this app already assumes a fixed catalog.**
+  `SHORTLIST_STD_FLOOR`, `RERANK_MARGIN`, `BROWSE_ALL_THRESHOLD`,
+  `GENDER_INTENT_THRESHOLD`, every `eval_relevance.py` labeled query, and
+  every specific product id/price referenced throughout this file were all
+  calibrated against one exact snapshot of the catalog. A live fetch was
+  always one upstream data change away from silently invalidating all of
+  it — pinning to a snapshot removes that fragility even apart from the
+  Render issue above.
+
+To deliberately refresh the snapshot (e.g. the live catalog changed and you
+want to re-calibrate against the new one — expect to re-run every
+calibration script afterward, not just replace the file):
+
+```python
+import json, requests
+data = requests.get("https://fakestoreapi.com/products", timeout=10).json()
+json.dump(data, open("products.json", "w"), indent=2)
+```
 
 ## Deployment
 
@@ -61,7 +93,8 @@ downloaded models under (`~/.cache/huggingface`).
 ## Architecture
 
 Single file, `app.py`. On startup:
-1. Fetches all products from the Fake Store API into `PRODUCTS` / `CORPUS`.
+1. Loads the vendored product catalog (`products.json`) into `PRODUCTS` /
+   `CORPUS` (see "Product catalog" above — not a live API fetch).
 2. Loads `sentence-transformers/all-MiniLM-L6-v2` once as `MODEL` and
    embeds the product corpus into `PRODUCT_EMBEDDINGS`.
 3. Fits a `TfidfVectorizer` over the same corpus into `PRODUCT_TFIDF`.

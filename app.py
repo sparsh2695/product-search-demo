@@ -1,11 +1,15 @@
+import json
+
 import numpy as np
-import requests
 from flask import Flask, render_template, request
 from sentence_transformers import CrossEncoder, SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+# Source of PRODUCTS_FILE's snapshot -- see load_products() for why this is
+# read from disk instead of fetched live on every startup.
 FAKE_STORE_URL = "https://fakestoreapi.com/products"
+PRODUCTS_FILE = "products.json"
 RRF_K = 60
 TOP_K = 5  # Hard cap on results returned; the actual count can be lower --
            # see RERANK_MARGIN -- when the reranker isn't confident beyond
@@ -182,25 +186,23 @@ BROWSE_ALL_SEED_PHRASES = [
 app = Flask(__name__)
 
 
-def fetch_products():
-    # Fake Store API returns 403 to the default python-requests User-Agent
-    # from at least some cloud-hosting IP ranges (seen on Render) -- a
-    # browser-like header works around whatever bot/scraper filtering is
-    # doing the blocking. Confirmed unnecessary for local dev, but harmless
-    # there too.
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-    }
-    try:
-        response = requests.get(FAKE_STORE_URL, timeout=10, headers=headers)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        print(f"Failed to fetch products from {FAKE_STORE_URL}: {e}")
-        print("Check your network connection and that the Fake Store API is reachable, then retry.")
-        raise SystemExit(1)
+def load_products():
+    # Vendored snapshot of the Fake Store API catalog (PRODUCTS_FILE), not a
+    # live fetch. Two independent reasons, not just one: (1) Fake Store API
+    # 403s requests from at least Render's outbound IP range regardless of
+    # User-Agent -- a browser-like header didn't fix it, so this looks like
+    # IP-range blocking, not header filtering, and isn't something a retry
+    # would get past. (2) Even setting that aside, every calibrated constant
+    # in this app (SHORTLIST_STD_FLOOR, RERANK_MARGIN, BROWSE_ALL_THRESHOLD,
+    # GENDER_INTENT_THRESHOLD, every labeled eval query, every product id/
+    # price referenced in CLAUDE.md) already implicitly assumes this exact
+    # 20-product catalog never changes -- a live fetch was always one upstream
+    # data change away from silently invalidating all of it. Pinning to a
+    # snapshot fixes the deployment issue and removes that fragility at the
+    # same time. Regenerate with the snippet in CLAUDE.md if the catalog is
+    # deliberately meant to be refreshed.
+    with open(PRODUCTS_FILE) as f:
+        data = json.load(f)
     return [
         {
             "id": p["id"],
@@ -210,12 +212,12 @@ def fetch_products():
             "category": p["category"],
             "image": p["image"],
         }
-        for p in response.json()
+        for p in data
     ]
 
 
-print("Fetching products from Fake Store API...")
-PRODUCTS = fetch_products()
+print("Loading products from vendored catalog snapshot...")
+PRODUCTS = load_products()
 CORPUS = [
     f"Category: {p['category']}. {p['title']}. {p['description']}" for p in PRODUCTS
 ]

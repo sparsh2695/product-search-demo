@@ -22,6 +22,7 @@ RUN python -c "from sentence_transformers import SentenceTransformer, CrossEncod
     CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
 
 COPY --chown=user app.py app.py
+COPY --chown=user products.json products.json
 COPY --chown=user templates/ templates/
 
 # Render assigns $PORT dynamically at container start and routes traffic to
