@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.gitignore
+tests/
+CLAUDE.md
+calibrate_std_floor.py
+calibrate_rerank_cutoff.py
+eval_relevance.py
+requirements-dev.txt

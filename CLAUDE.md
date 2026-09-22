@@ -11,8 +11,44 @@ python app.py   # http://127.0.0.1:5001
 ```
 
 Dependencies are pinned in `requirements.txt` (flask, requests,
-sentence-transformers, scikit-learn, numpy). No other files/deps needed —
-keep it that way; this is a demo, not a production service.
+sentence-transformers, scikit-learn, numpy, gunicorn). Keep additions to this
+list to genuine necessities — this is a demo, not a production service.
+`gunicorn` is the one exception to "no production concerns": it's only used
+by `Dockerfile` for public deployment (see "Deployment" below); local dev
+still runs Flask's own server via `python app.py` and is unaffected.
+
+## Deployment
+
+Deployed to [Render](https://render.com) as a Web Service, built from
+`Dockerfile` (Render auto-detects it — no separate build/start command
+configured in Render's UI). Considered Hugging Face Spaces first, but its
+Docker and Gradio SDKs both now require a paid PRO plan; only Spaces' Static
+SDK (no server-side execution at all, so no Flask) is free. Render's free
+Web Service tier runs a real container at no cost (spins down after 15 min
+idle; cold-starts on the next request). Two things this required that plain
+local dev doesn't:
+
+- **`gunicorn`, not `python app.py`, in production.** Flask's own docs say
+  its built-in dev server isn't meant to be reachable by untrusted traffic.
+  `Dockerfile`'s `CMD` runs gunicorn directly against the `app:app` WSGI
+  object, which means the `if __name__ == "__main__": app.run(...)` block at
+  the bottom of `app.py` never executes in the container at all (gunicorn
+  imports the module; `__name__` is `"app"`, not `"__main__"`) — so it didn't
+  need to change for this, and local dev behavior (`python app.py`,
+  port 5001) is untouched.
+- **Single gunicorn worker.** Each worker is a separate process with its own
+  copy of the loaded models (bi-encoder + cross-encoder, ~200MB+ combined) —
+  multiple workers would multiply memory on a free-tier instance with limited
+  RAM. Fine for a demo; would need revisiting under real concurrent load.
+
+`Dockerfile`'s `CMD` binds to `$PORT`, which Render assigns dynamically at
+container start (not a fixed port like some other platforms use) — written
+in shell form (`CMD sh -c '...'`), not exec-array form, since exec form
+doesn't expand environment variables; it would pass the literal string
+`${PORT:-7860}` to gunicorn instead of substituting the actual port. Non-root
+container user (`useradd -m -u 1000 user`) is standard Docker practice, and
+incidentally also gives `sentence-transformers` a real `$HOME` to cache
+downloaded models under (`~/.cache/huggingface`).
 
 ## Architecture
 
