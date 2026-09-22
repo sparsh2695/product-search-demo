@@ -183,8 +183,19 @@ app = Flask(__name__)
 
 
 def fetch_products():
+    # Fake Store API returns 403 to the default python-requests User-Agent
+    # from at least some cloud-hosting IP ranges (seen on Render) -- a
+    # browser-like header works around whatever bot/scraper filtering is
+    # doing the blocking. Confirmed unnecessary for local dev, but harmless
+    # there too.
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+    }
     try:
-        response = requests.get(FAKE_STORE_URL, timeout=10)
+        response = requests.get(FAKE_STORE_URL, timeout=10, headers=headers)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch products from {FAKE_STORE_URL}: {e}")
