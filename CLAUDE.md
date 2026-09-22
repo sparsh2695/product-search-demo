@@ -41,6 +41,14 @@ local dev doesn't:
   multiple workers would multiply memory on a free-tier instance with limited
   RAM. Fine for a demo; would need revisiting under real concurrent load.
 
+Free-tier instances spin down after ~15 min idle and have no persistent
+disk, so a fresh container has nothing cached — `Dockerfile` bakes both
+models in at `docker build` time (`RUN python -c "... SentenceTransformer
+(...); CrossEncoder(...)"`) instead of letting them download on first use.
+Without this, every cold start would re-download ~200MB+ from Hugging
+Face's hub before serving a single request; baking them in trades a slower
+one-time build for a fast wake-up on every subsequent cold start.
+
 `Dockerfile`'s `CMD` binds to `$PORT`, which Render assigns dynamically at
 container start (not a fixed port like some other platforms use) — written
 in shell form (`CMD sh -c '...'`), not exec-array form, since exec form

@@ -11,6 +11,16 @@ WORKDIR /app
 COPY --chown=user requirements.txt requirements.txt
 RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
+# Bake both models into the image at build time instead of letting
+# sentence-transformers download them on first use. Free-tier instances
+# spin down after inactivity and have no persistent disk, so without this
+# every cold start would re-download ~200MB+ of models before it could
+# serve a single request -- baking them in trades a slower one-time build
+# for a fast wake-up on every subsequent cold start.
+RUN python -c "from sentence_transformers import SentenceTransformer, CrossEncoder; \
+    SentenceTransformer('all-MiniLM-L6-v2'); \
+    CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
+
 COPY --chown=user app.py app.py
 COPY --chown=user templates/ templates/
 
