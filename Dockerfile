@@ -9,6 +9,20 @@ ENV PATH="/home/user/.local/bin:$PATH"
 WORKDIR /app
 
 COPY --chown=user requirements.txt requirements.txt
+# Install the CPU-only torch build FIRST, from its own dedicated index,
+# before anything that depends on it. The default PyPI torch wheel for
+# Linux declares hard dependencies on several nvidia-*-cu12 CUDA packages
+# (several hundred MB) that are dead weight on Render's CPU-only free tier
+# -- this app never touches a GPU -- and that unused bulk was pushing
+# resident memory over the 512MB limit during model loading. Doing this as
+# a separate, prior step (rather than --extra-index-url alongside PyPI on
+# the requirements.txt install) is deliberate: pip's resolver doesn't
+# guarantee which index wins when a package exists on both, so installing
+# torch on its own first, from --index-url (not --extra-index-url), is the
+# only way to be certain the CPU build is what's actually present when
+# sentence-transformers is installed next and finds its torch requirement
+# already satisfied.
+RUN pip install --no-cache-dir --upgrade torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
 # Bake both models into the image at build time instead of letting

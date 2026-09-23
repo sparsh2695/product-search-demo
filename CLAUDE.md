@@ -73,6 +73,24 @@ local dev doesn't:
   multiple workers would multiply memory on a free-tier instance with limited
   RAM. Fine for a demo; would need revisiting under real concurrent load.
 
+**CPU-only `torch`, installed as its own step before `requirements.txt`.**
+First deploy hit "Out of memory (used over 512Mi)" while loading the first
+model. The default PyPI `torch` wheel for Linux declares hard dependencies
+on several `nvidia-*-cu12` CUDA packages (several hundred MB) regardless of
+whether a GPU is present — dead weight on Render's CPU-only free tier, since
+this app never touches a GPU, and that unused bulk was what pushed resident
+memory over the limit. Fix: `RUN pip install torch --index-url
+https://download.pytorch.org/whl/cpu` as its own layer, *before* installing
+`requirements.txt` (which doesn't list `torch` explicitly — it's a
+transitive dependency of `sentence-transformers`). This has to be
+`--index-url`, not `--extra-index-url` alongside PyPI on the
+`requirements.txt` install: pip's resolver doesn't guarantee which index
+wins when a package exists on both, so installing `torch` alone first, from
+its own dedicated index, is the only way to be certain the CPU build is
+what's actually present when `sentence-transformers` is installed next and
+finds its `torch` requirement already satisfied (verified locally: the
+second install step's package list doesn't include `torch` at all).
+
 Free-tier instances spin down after ~15 min idle and have no persistent
 disk, so a fresh container has nothing cached — `Dockerfile` bakes both
 models in at `docker build` time (`RUN python -c "... SentenceTransformer
