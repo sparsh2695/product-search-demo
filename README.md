@@ -1,13 +1,13 @@
 # Product Search Demo
 
-**Live demo:** _add your Render URL here after deploying, e.g. https://product-search-demo.onrender.com_
+**Live demo: [product-search-demo.onrender.com](https://product-search-demo.onrender.com)**
 _(free-tier instance — the first request after a few minutes of inactivity takes ~30-60s to wake it up)_
 
-A small Flask demo of hybrid product search over the [Fake Store
-API](https://fakestoreapi.com/products) catalog (20 products): Reciprocal
-Rank Fusion over semantic (bi-encoder) and lexical (TF-IDF) similarity,
-reranked by a cross-encoder, with embedding-based gender-intent, browse-all,
-and no-match detection, plus price filtering.
+A small Flask demo of hybrid product search over a 20-product catalog
+vendored from the [Fake Store API](https://fakestoreapi.com/products):
+Reciprocal Rank Fusion over semantic (bi-encoder) and lexical (TF-IDF)
+similarity, reranked by a cross-encoder, with embedding-based gender-intent,
+browse-all, and no-match detection, plus price filtering.
 
 Try queries like:
 - `gift for my dad`
